@@ -328,6 +328,192 @@ function tryParseImportStatement () {
   }
 }
 
+// True for a char that can end a value. skipExpression uses this to tell
+// division from a regex: a '/' right after a value is division. Non-ASCII is
+// always an identifier char here (every JS operator is ASCII), so it counts as
+// a value — otherwise `x = π / 2` would read the '/' as a regex.
+function isValueChar (c) {
+  return c >= 48/*0*/ && c <= 57/*9*/ || c >= 65/*A*/ && c <= 90/*Z*/ || c >= 97/*a*/ && c <= 122/*z*/ || c === 95/*_*/ || c === 36/*$*/ || c >= 128;
+}
+
+// pos AT the opening backtick. Consumes the template literal including nested
+// ${ } interpolations (which may themselves contain templates, objects and
+// strings). Leaves pos AT the closing backtick.
+function skipTemplateLiteral () {
+  while (pos++ < end) {
+    const ch = source.charCodeAt(pos);
+    if (ch === 92/*\*/) {
+      pos++;
+      continue;
+    }
+    if (ch === 96/*`*/)
+      return;
+    if (ch === 36/*$*/ && source.charCodeAt(pos + 1) === 123/*{*/) {
+      pos++;
+      let braceDepth = 1;
+      while (braceDepth !== 0 && pos++ < end) {
+        const c = source.charCodeAt(pos);
+        if (c === 92/*\*/)
+          pos++;
+        else if (c === 123/*{*/)
+          braceDepth++;
+        else if (c === 125/*}*/)
+          braceDepth--;
+        else if (c === 39/*'*/ || c === 34/*"*/)
+          stringLiteral(c);
+        else if (c === 96/*`*/)
+          skipTemplateLiteral();
+        else if (c === 47/*/*/ && source.charCodeAt(pos + 1) === 47/*/*/)
+          lineComment();
+        else if (c === 47/*/*/ && source.charCodeAt(pos + 1) === 42/***/)
+          blockComment(true);
+      }
+    }
+  }
+}
+
+// Skips an initializer or default-value expression, returning the depth-0
+// terminator (',' or ';', or an enclosing ')'/']'/'}' that the expression did
+// not open) and leaving pos AT it. With `asi`, a line break following a value
+// also terminates so the statement after an automatic semicolon is never read
+// as another binding. Entry: pos AT the char before the expression (the '=' of
+// an initializer, or the '[' of a computed key).
+function skipExpression (asi) {
+  let depth = 0;
+  let lastWasValue = false;
+  while (pos++ < end) {
+    const ch = source.charCodeAt(pos);
+    if (ch === 47/*/*/) {
+      const next = source.charCodeAt(pos + 1);
+      if (next === 47/*/*/) {
+        lineComment();
+        if (asi && depth === 0 && lastWasValue && isBr(source.charCodeAt(pos)))
+          return source.charCodeAt(pos);
+        continue;
+      }
+      if (next === 42/***/) {
+        blockComment(true);
+        continue;
+      }
+      // A '/' after a value is division; otherwise it opens a regular expression.
+      if (lastWasValue) {
+        lastWasValue = false;
+        continue;
+      }
+      regularExpression();
+      lastWasValue = true;
+      continue;
+    }
+    if (ch === 39/*'*/ || ch === 34/*"*/) {
+      stringLiteral(ch);
+      lastWasValue = true;
+      continue;
+    }
+    if (ch === 96/*`*/) {
+      skipTemplateLiteral();
+      lastWasValue = true;
+      continue;
+    }
+    if (ch === 40/*(*/ || ch === 91/*[*/ || ch === 123/*{*/) {
+      depth++;
+      lastWasValue = false;
+      continue;
+    }
+    if (ch === 41/*)*/ || ch === 93/*]*/ || ch === 125/*}*/) {
+      if (depth === 0)
+        return ch;
+      depth--;
+      lastWasValue = true;
+      continue;
+    }
+    if (depth === 0) {
+      if (ch === 44/*,*/ || ch === 59/*;*/)
+        return ch;
+      if (asi && lastWasValue && isBr(ch))
+        return ch;
+    }
+    if (!isBrOrWs(ch))
+      lastWasValue = isValueChar(ch);
+  }
+  return 0;
+}
+
+// pos AT a binding target: an identifier or a nested '{'/'[' destructuring
+// pattern. Adds the bound name(s), then skips trailing whitespace/comments and
+// returns the next significant char with pos AT it. pos is left unchanged when
+// no target is present (malformed input or the end of a binding list).
+function readBindingTarget (ch) {
+  if (ch === 123/*{*/ || ch === 91/*[*/) {
+    readBindingPattern();
+    pos++;
+  } else {
+    const nameStart = pos;
+    readToWsOrPunctuator(ch);
+    if (pos > nameStart)
+      addExport(nameStart, pos, nameStart, pos);
+  }
+  return commentWhitespace(true);
+}
+
+// pos AT '{' or '['. Adds every identifier bound by the destructuring pattern,
+// resolving aliases ({ a: b } adds b), defaults ({ a = 1 } adds a), rest
+// (...rest adds rest) and arbitrary nesting. Leaves pos AT the matching closer.
+function readBindingPattern () {
+  const isObject = source.charCodeAt(pos) === 123/*{*/;
+  const close = isObject ? 125/*}*/ : 93/*]*/;
+  pos++;
+  let ch = commentWhitespace(true);
+  while (ch !== close && pos <= end) {
+    // ...rest element
+    if (ch === 46/*.*/ && source.charCodeAt(pos + 1) === 46/*.*/ && source.charCodeAt(pos + 2) === 46/*.*/) {
+      pos += 3;
+      ch = commentWhitespace(true);
+      ch = readBindingTarget(ch);
+      continue;
+    }
+    if (isObject) {
+      const keyStart = pos;
+      let keyEnd = pos;
+      if (ch === 91/*[*/) {
+        skipExpression(false); // computed key: pos AT matching ']'
+        pos++;
+        ch = commentWhitespace(true);
+      } else if (ch === 34/*"*/ || ch === 39/*'*/) {
+        stringLiteral(ch);
+        pos++;
+        ch = commentWhitespace(true);
+      } else {
+        readToWsOrPunctuator(ch);
+        keyEnd = pos;
+        ch = commentWhitespace(true);
+      }
+      // { key: target } binds target; shorthand { key } / { key = default }
+      // binds the key. A computed ([expr]) or string key has no shorthand.
+      if (ch === 58/*:*/) {
+        pos++;
+        ch = commentWhitespace(true);
+        ch = readBindingTarget(ch);
+      } else if (keyEnd > keyStart) {
+        addExport(keyStart, keyEnd, keyStart, keyEnd);
+      }
+    } else if (ch === 44/*,*/) { // array elision
+      pos++;
+      ch = commentWhitespace(true);
+      continue;
+    } else {
+      ch = readBindingTarget(ch);
+    }
+    if (ch === 61/*=*/)
+      ch = skipExpression(false); // default value
+    if (ch === 44/*,*/) {
+      pos++;
+      ch = commentWhitespace(true);
+    } else {
+      break;
+    }
+  }
+}
+
 function tryParseExportStatement () {
   const sStartPos = pos;
   const prevExport = exports.length;
@@ -379,34 +565,32 @@ function tryParseExportStatement () {
       pos += 2;
     // fallthrough
 
-    // export var/let/const name = ...(, name = ...)+
+    // export var/let/const binding (, binding)*  — each binding is an
+    // identifier or a destructuring pattern, optionally `= initializer`.
+    // Initializers and defaults are skipped expression-aware (see
+    // skipExpression) so a comma inside them does not split the binding list,
+    // and the list ends at ';', EOF or an ASI line break — never reading into
+    // the following statement.
     case 118/*v*/:
-    case 109/*l*/:
-      // destructured initializations not currently supported (skipped for { or [)
-      // also, lexing names after variable equals is skipped (export var p = function () { ... }, q = 5 skips "q")
-      pos += 2;
+    case 108/*l*/: {
+      pos += 3;
       facade = false;
-      do {
+      ch = commentWhitespace(true);
+      while (pos <= end) {
+        const bindingStart = pos;
+        ch = readBindingTarget(ch);
+        if (pos === bindingStart)
+          break;
+        if (ch === 61/*=*/)
+          ch = skipExpression(true);
+        if (ch !== 44/*,*/)
+          break;
         pos++;
         ch = commentWhitespace(true);
-        const startPos = pos;
-        ch = readToWsOrPunctuator(ch);
-        // dont yet handle [ { destructurings
-        if (ch === 123/*{*/ || ch === 91/*[*/) {
-          pos--;
-          return;
-        }
-        if (pos === startPos)
-          return;
-        addExport(startPos, pos, startPos, pos);
-        ch = commentWhitespace(true);
-        if (ch === 61/*=*/) {
-          pos--;
-          return;
-        }
-      } while (ch === 44/*,*/);
+      }
       pos--;
       return;
+    }
 
 
     // export {...}

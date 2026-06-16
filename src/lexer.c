@@ -424,6 +424,192 @@ void tryParseImportStatement () {
   }
 }
 
+// True for a char that can end a value. skipExpression uses this to tell
+// division from a regex: a '/' right after a value is division. Non-ASCII is
+// always an identifier char here (every JS operator is ASCII), so it counts as
+// a value — otherwise `x = π / 2` would read the '/' as a regex.
+bool isValueChar (char16_t c) {
+  return c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c == '_' || c == '$' || c >= 128;
+}
+
+// pos AT the opening backtick. Consumes the template literal including nested
+// ${ } interpolations (which may themselves contain templates, objects and
+// strings). Leaves pos AT the closing backtick.
+void skipTemplateLiteral () {
+  while (pos++ < end) {
+    char16_t ch = *pos;
+    if (ch == '\\') {
+      pos++;
+      continue;
+    }
+    if (ch == '`')
+      return;
+    if (ch == '$' && *(pos + 1) == '{') {
+      pos++;
+      uint32_t braceDepth = 1;
+      while (braceDepth != 0 && pos++ < end) {
+        char16_t c = *pos;
+        if (c == '\\')
+          pos++;
+        else if (c == '{')
+          braceDepth++;
+        else if (c == '}')
+          braceDepth--;
+        else if (c == '\'' || c == '"')
+          stringLiteral(c);
+        else if (c == '`')
+          skipTemplateLiteral();
+        else if (c == '/' && *(pos + 1) == '/')
+          lineComment();
+        else if (c == '/' && *(pos + 1) == '*')
+          blockComment(true);
+      }
+    }
+  }
+}
+
+// Skips an initializer or default-value expression, returning the depth-0
+// terminator (',' or ';', or an enclosing ')'/']'/'}' that the expression did
+// not open) and leaving pos AT it. With `asi` set, a line break following a
+// value also terminates, so the statement after an automatic semicolon is never
+// read as another binding. Entry: pos AT the char before the expression (the
+// '=' of an initializer, or the '[' of a computed key).
+char16_t skipExpression (bool asi) {
+  uint32_t depth = 0;
+  bool lastWasValue = false;
+  while (pos++ < end) {
+    char16_t ch = *pos;
+    if (ch == '/') {
+      char16_t next_ch = *(pos + 1);
+      if (next_ch == '/') {
+        lineComment();
+        if (asi && depth == 0 && lastWasValue && isBr(*pos))
+          return *pos;
+        continue;
+      }
+      if (next_ch == '*') {
+        blockComment(true);
+        continue;
+      }
+      // A '/' after a value is division; otherwise it opens a regular expression.
+      if (lastWasValue) {
+        lastWasValue = false;
+        continue;
+      }
+      regularExpression();
+      lastWasValue = true;
+      continue;
+    }
+    if (ch == '\'' || ch == '"') {
+      stringLiteral(ch);
+      lastWasValue = true;
+      continue;
+    }
+    if (ch == '`') {
+      skipTemplateLiteral();
+      lastWasValue = true;
+      continue;
+    }
+    if (ch == '(' || ch == '[' || ch == '{') {
+      depth++;
+      lastWasValue = false;
+      continue;
+    }
+    if (ch == ')' || ch == ']' || ch == '}') {
+      if (depth == 0)
+        return ch;
+      depth--;
+      lastWasValue = true;
+      continue;
+    }
+    if (depth == 0) {
+      if (ch == ',' || ch == ';')
+        return ch;
+      if (asi && lastWasValue && isBr(ch))
+        return ch;
+    }
+    if (!isBrOrWs(ch))
+      lastWasValue = isValueChar(ch);
+  }
+  return '\0';
+}
+
+// pos AT a binding target: an identifier or a nested '{'/'[' destructuring
+// pattern. Adds the bound name(s), then skips trailing whitespace/comments and
+// returns the next significant char with pos AT it. pos is left unchanged when
+// no target is present (malformed input or the end of a binding list).
+char16_t readBindingTarget (char16_t ch) {
+  if (ch == '{' || ch == '[') {
+    readBindingPattern();
+    pos++;
+  } else {
+    char16_t* nameStart = pos;
+    readToWsOrPunctuator(ch);
+    if (pos > nameStart)
+      addExport(nameStart, pos, nameStart, pos);
+  }
+  return commentWhitespace(true);
+}
+
+// pos AT '{' or '['. Adds every identifier bound by the destructuring pattern,
+// resolving aliases ({ a: b } adds b), defaults ({ a = 1 } adds a), rest
+// (...rest adds rest) and arbitrary nesting. Leaves pos AT the matching closer.
+void readBindingPattern () {
+  bool isObject = *pos == '{';
+  char16_t close = isObject ? '}' : ']';
+  pos++;
+  char16_t ch = commentWhitespace(true);
+  while (ch != close && pos <= end) {
+    // ...rest element
+    if (ch == '.' && *(pos + 1) == '.' && *(pos + 2) == '.') {
+      pos += 3;
+      ch = commentWhitespace(true);
+      ch = readBindingTarget(ch);
+      continue;
+    }
+    if (isObject) {
+      char16_t* keyStart = pos;
+      char16_t* keyEnd = pos;
+      if (ch == '[') {
+        skipExpression(false); // computed key: pos AT matching ']'
+        pos++;
+        ch = commentWhitespace(true);
+      } else if (isQuote(ch)) {
+        stringLiteral(ch);
+        pos++;
+        ch = commentWhitespace(true);
+      } else {
+        readToWsOrPunctuator(ch);
+        keyEnd = pos;
+        ch = commentWhitespace(true);
+      }
+      // { key: target } binds target; shorthand { key } / { key = default }
+      // binds the key. A computed ([expr]) or string key has no shorthand.
+      if (ch == ':') {
+        pos++;
+        ch = commentWhitespace(true);
+        ch = readBindingTarget(ch);
+      } else if (keyEnd > keyStart) {
+        addExport(keyStart, keyEnd, keyStart, keyEnd);
+      }
+    } else if (ch == ',') { // array elision
+      pos++;
+      ch = commentWhitespace(true);
+      continue;
+    } else {
+      ch = readBindingTarget(ch);
+    }
+    if (ch == '=')
+      ch = skipExpression(false); // default value
+    if (ch == ',') {
+      pos++;
+      ch = commentWhitespace(true);
+    } else {
+      break;
+    }
+  }
+}
+
 void tryParseExportStatement () {
   char16_t* sStartPos = pos;
   Export* prev_export_write_head = export_write_head;
@@ -578,55 +764,32 @@ void tryParseExportStatement () {
         pos += 2;
       // fallthrough
 
-      // export var/let/const name = ...(, name = ...)+
+      // export var/let/const binding (, binding)*  — each binding is an
+      // identifier or a destructuring pattern, optionally `= initializer`.
+      // Initializers and defaults are skipped expression-aware (see
+      // skipExpression) so a comma inside them does not split the binding list,
+      // and the list ends at ';', EOF or an ASI line break — never reading into
+      // the following statement.
       case 'v':
-      case 'l':
-        // simple declaration lexing only handles names. Any syntax after variable equals is skipped
-        // (export var p = function () { ... }, q = 5 skips "q")
+      case 'l': {
         pos += 3;
         facade = false;
         ch = commentWhitespace(true);
-        startPos = pos;
-        ch = readToWsOrPunctuator(ch);
-        // very basic destructuring support only of the singular form:
-        //   export const { a, b, ...c }
-        // without aliasing, nesting or defaults
-        bool destructuring = ch == '{' || ch == '[';
-        const char16_t* destructuringPos = pos;
-        if (destructuring) {
-          pos += 1;
-          ch = commentWhitespace(true);
-          startPos = pos;
-          ch = readToWsOrPunctuator(ch);
-        }
-        do {
-          if (pos == startPos)
+        while (pos <= end) {
+          char16_t* bindingStart = pos;
+          ch = readBindingTarget(ch);
+          if (pos == bindingStart)
             break;
-          addExport(startPos, pos, startPos, pos);
-          ch = commentWhitespace(true);
-          if (destructuring && (ch == '}' || ch == ']')) {
-            destructuring = false;
+          if (ch == '=')
+            ch = skipExpression(true);
+          if (ch != ',')
             break;
-          }
-          if (ch != ',') {
-            pos -= 1;
-            break;
-          }
           pos++;
           ch = commentWhitespace(true);
-          startPos = pos;
-          // internal destructurings unsupported
-          if (ch == '{' || ch == '[') {
-            pos -= 1;
-            break;
-          }
-          ch = readToWsOrPunctuator(ch);
-        } while (true);
-        // if stuck inside destructuring syntax, backtrack
-        if (destructuring) {
-          pos = (char16_t*)destructuringPos - 1;
         }
+        pos--;
         return;
+      }
 
       default:
         return;
