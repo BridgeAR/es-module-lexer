@@ -42,6 +42,7 @@ struct Import {
   const char16_t* attr_index;
   const char16_t* dynamic;
   bool safe;
+  bool type_only;
   enum ImportType import_ty;
   struct Attribute* attributes;
   struct Import* next;
@@ -70,6 +71,7 @@ struct Export {
   const char16_t* end;
   const char16_t* local_start;
   const char16_t* local_end;
+  bool type_only;
   struct Export* next;
 };
 typedef struct Export Export;
@@ -149,6 +151,7 @@ void addImport (const char16_t* statement_start, const char16_t* start, const ch
   import->attr_index = 0;
   import->dynamic = dynamic;
   import->safe = dynamic == STANDARD_IMPORT;
+  import->type_only = false;
   import->attributes = NULL;
   import->next = NULL;
   if (dynamic == IMPORT_META || dynamic == STANDARD_IMPORT)
@@ -167,6 +170,7 @@ void addExport (const char16_t* start, const char16_t* end, const char16_t* loca
   export->end = end;
   export->local_start = local_start;
   export->local_end = local_end;
+  export->type_only = false;
   export->next = NULL;
   hasModuleSyntax = true;
 }
@@ -213,6 +217,10 @@ uint32_t id () {
 uint32_t ip () {
   return import_read_head->safe;
 }
+// getImportTypeOnly
+uint32_t itp () {
+  return import_read_head->type_only;
+}
 // getExportStart
 uint32_t es () {
   return export_read_head->start - source;
@@ -228,6 +236,10 @@ int32_t els () {
 // getExportLocalEnd
 int32_t ele () {
   return export_read_head->local_end ? export_read_head->local_end - source : -1;
+}
+// getExportTypeOnly
+uint32_t etp () {
+  return export_read_head->type_only;
 }
 // readImport
 bool ri () {
@@ -301,6 +313,13 @@ char16_t readBindingTarget (char16_t ch);
 void readBindingPattern ();
 char16_t skipExpression (bool asi);
 bool isValueChar (char16_t c);
+
+#ifdef LEX_TS
+// pos AT the start of a `type` token candidate. Returns true when it is the
+// contextual `type` keyword followed by whitespace (so `type T`, `type {`),
+// not an identifier whose prefix is "type" (typeof, typed, ...).
+bool isTsTypeKeyword (char16_t* pos);
+#endif
 
 char16_t commentWhitespace (bool br);
 void regularExpression ();

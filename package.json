@@ -15,6 +15,12 @@
     "./js": {
       "types": "./types/lexer.d.ts",
       "default": "./dist/lexer.asm.js"
+    },
+    "./ts": {
+      "types": "./types/lexer-ts.d.ts",
+      "module": "./dist/lexer.ts.js",
+      "import": "./dist/lexer.ts.js",
+      "require": "./dist/lexer.ts.cjs"
     }
   },
   "scripts": {

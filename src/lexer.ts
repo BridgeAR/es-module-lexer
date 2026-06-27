@@ -121,6 +121,13 @@ export interface ImportSpecifier {
    * // Returns [['type', 'json'], ['integrity', 'sha384-...']]
    */
   readonly at: ReadonlyArray<readonly [string, string]> | null;
+
+  /**
+   * `true` for a TypeScript type-only import (`import type ... from`), elided
+   * from the emitted JavaScript. Always `false` from `parse`; only set by
+   * `parseTs`.
+   */
+  readonly tp: boolean;
 }
 
 export interface ExportSpecifier {
@@ -195,6 +202,13 @@ export interface ExportSpecifier {
    * End of local name, or -1.
    */
   readonly le: number;
+
+  /**
+   * `true` for a TypeScript type-only export (`export type { ... }` or an inline
+   * `export { type X }`), elided from the emitted JavaScript. Always `false`
+   * from `parse`; only set by `parseTs`.
+   */
+  readonly tp: boolean;
 }
 
 export interface ParseError extends Error {
@@ -237,7 +251,7 @@ export function parse (source: string, name = '@'): readonly [
 
   const imports: ImportSpecifier[] = [], exports: ExportSpecifier[] = [];
   while (wasm.ri()) {
-    const s = wasm.is(), e = wasm.ie(), t = wasm.it(), a = wasm.ai(), d = wasm.id(), ss = wasm.ss(), se = wasm.se();
+    const s = wasm.is(), e = wasm.ie(), t = wasm.it(), a = wasm.ai(), d = wasm.id(), ss = wasm.ss(), se = wasm.se(), tp = !!wasm.itp();
     let n;
     if (wasm.ip())
       n = decode(source.slice(d === -1 ? s - 1 : s, d === -1 ? e + 1 : e));
@@ -247,15 +261,15 @@ export function parse (source: string, name = '@'): readonly [
       const aks = wasm.aks(), ake = wasm.ake(), avs = wasm.avs(), ave = wasm.ave();
       at.push([decodeIfQuoted(source.slice(aks, ake)), decodeIfQuoted(source.slice(avs, ave))]);
     }
-    imports.push({ n, t, s, e, ss, se, d, a, at: at.length > 0 ? at : null });
+    imports.push({ n, t, s, e, ss, se, d, a, at: at.length > 0 ? at : null, tp });
   }
   while (wasm.re()) {
-    const s = wasm.es(), e = wasm.ee(), ls = wasm.els(), le = wasm.ele();
+    const s = wasm.es(), e = wasm.ee(), ls = wasm.els(), le = wasm.ele(), tp = !!wasm.etp();
     const n = decodeIfQuoted(source.slice(s, e));
     const ln = ls < 0 ? undefined : decodeIfQuoted(source.slice(ls, le));
     exports.push({
       s, e, ls, le,
-      n, ln,
+      n, ln, tp,
     });
   }
 
@@ -311,6 +325,8 @@ let wasm: {
   els(): number;
   /** getExportStart */
   es(): number;
+  /** getExportTypeOnly */
+  etp(): number;
   /** facade */
   f(): boolean;
   /** hasModuleSyntax */
@@ -321,6 +337,8 @@ let wasm: {
   ie(): number;
   /** getImportSafeString */
   ip(): number;
+  /** getImportTypeOnly */
+  itp(): number;
   /** getImportStart */
   is(): number;
   /** readExport */
