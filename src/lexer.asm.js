@@ -60,7 +60,9 @@ export function parse (_source, _name = '@') {
       const attrValue = decodeIfQuoted(avs, ave);
       at.push([attrKey, attrValue]);
     }
-    imports.push({ t, n, s, e, ss, se, d, a, at: at.length > 0 ? at : null });
+    // The asm.js build is JavaScript-only (no TypeScript variant), so the
+    // type-only marker is always false; it mirrors the wasm result shape.
+    imports.push({ t, n, s, e, ss, se, d, a, at: at.length > 0 ? at : null, tp: false });
   }
   while (asm.re()) {
     const s = asm.es(), e = asm.ee(), ls = asm.els(), le = asm.ele();
@@ -68,7 +70,7 @@ export function parse (_source, _name = '@') {
     const ln = ls < 0 ? undefined : decodeIfQuoted(ls, le);
     exports.push({
       s, e, ls, le,
-      n, ln,
+      n, ln, tp: false,
     });
   }
 

@@ -8,6 +8,9 @@ lib/lexer.asm.in.js
 lib/lexer.layout.js
 lib/*.mem
 src/lexer.js
+src/lexer-ts.js
 types/lexer.d.ts
+types/lexer-ts.d.ts
 src/*.mem
 src/lexer.js.map
+src/lexer-ts.js.map
