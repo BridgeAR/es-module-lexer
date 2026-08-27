@@ -47,11 +47,12 @@ switch (exported.type) {
     break;
   case 'reexport':
     exported.importName;
+    exported.from satisfies string;
     // @ts-expect-error Local names only exist on direct exports.
     exported.localName;
     break;
   case 'reexport-all':
-    exported.from;
+    exported.from satisfies string;
     // @ts-expect-error Star reexports do not have an exported name.
     exported.name;
     break;

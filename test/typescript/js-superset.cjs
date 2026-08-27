@@ -74,11 +74,4 @@ suite('full build stays a superset of plain JavaScript', () => {
     assert.deepStrictEqual(imports.map(i => i.n), ['m']);
     assert.deepStrictEqual(exports2.map(e => [e.t, e.n, e.im]), [[2, 'b', 'a']]);
   });
-
-  test('undecodable reexport specifier is undefined, not misdecoded', () => {
-    const [imports, exports] = parse(`export * from 'a\\u{}';`);
-    assert.strictEqual(imports[0].n, undefined);
-    assert.strictEqual(exports[0].t, 3);
-    assert.strictEqual(exports[0].f, undefined);
-  });
 });

@@ -277,10 +277,9 @@ export interface Reexport {
    */
   readonly importNameEnd: number;
   /**
-   * Module specifier reexported from; `undefined` when the specifier string
-   * does not decode as JS (see `StaticImport.specifier`).
+   * Module specifier reexported from.
    */
-  readonly from: string | undefined;
+  readonly from: string;
   /**
    * Index of the originating import in the imports array.
    */
@@ -298,10 +297,9 @@ export interface Reexport {
 export interface ReexportAll {
   readonly type: 'reexport-all';
   /**
-   * Module specifier reexported from; `undefined` when the specifier string
-   * does not decode as JS (see `StaticImport.specifier`).
+   * Module specifier reexported from.
    */
-  readonly from: string | undefined;
+  readonly from: string;
   /**
    * Index of the originating import in the imports array.
    */
@@ -331,6 +329,15 @@ export interface ParseError extends Error {
 }
 
 const isLE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+
+/**
+ * Direct eval inherits strict mode and uses the matching V8 compilation-cache key.
+ * @param literal Quoted JavaScript string literal.
+ */
+function decodeStringLiteral (literal: string): string {
+  'use strict'
+  return eval(literal)
+}
 
 /**
  * Outputs the list of exports and locations of import specifiers,
@@ -462,11 +469,9 @@ export function parse (source: string, name = '@'): readonly [
     exportPtr = wasm.re();
   }
 
-  // strict mode matches the asm build's eval-free decoder in rejecting
-  // legacy octal escapes
   function decode (str: string, idx: number): string {
     try {
-      return (0, eval)('"use strict";' + str)
+      return decodeStringLiteral(str)
     }
     catch (e) {
       throw Object.assign(new Error(`Parse error ${name}:${source.slice(0, idx).split('\n').length}:${idx - source.lastIndexOf('\n', idx - 1)}`), { idx });
