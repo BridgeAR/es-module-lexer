@@ -310,6 +310,111 @@ suite('TS type declarations', () => {
     assert.deepStrictEqual(exports.map(e => e.tp), [true]);
   });
 
+  test('typed exported binding lists report every name', () => {
+    const [, exports] = parse(`
+      export const alpha: number = 1, beta: string = 'two';
+      export let gamma: boolean, delta: bigint;
+    `);
+    assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'beta', 'gamma', 'delta']);
+    assert.deepStrictEqual(exports.map(e => e.tp), [false, false, false, false]);
+  });
+
+  test('mixed typed and untyped exported bindings report every name', () => {
+    const [, exports] = parse(`
+      export const alpha = 1, beta: string = 'two', gamma = 3;
+      export let delta: number = 4, epsilon = 5, zeta: boolean;
+    `);
+    assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta']);
+  });
+
+  test('line breaks before initializers and separators keep the typed binding list open', () => {
+    const [, exports] = parse(`
+      export const alpha: number
+        = 1, beta: string
+        = 'two';
+    `);
+    assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'beta']);
+  });
+
+  test('nested type annotations retain imports and trailing bindings', () => {
+    const [imports, exports] = parse(`
+      export const alpha: Map<import('types').Key, number> = value,
+        beta: (input: string) => [number, string] = transform,
+        gamma: { value: number } = object;
+    `);
+    assert.deepStrictEqual(imports.map(i => [i.n, i.tp]), [['types', true]]);
+    assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'beta', 'gamma']);
+  });
+
+  test('line breaks inside postfix, indexed, qualified and generic annotations keep the list open', () => {
+    const [, exports] = parse(`
+      export const postfix: string[
+        ] = [], indexed: Box[
+        Key] = value, qualified: Namespace
+        .Type = value, generic: Map<
+        string,
+        number> = value, trailing = true;
+    `);
+    assert.deepStrictEqual(exports.map(e => e.n),
+      ['postfix', 'indexed', 'qualified', 'generic', 'trailing']);
+  });
+
+  test('line-leading indexed and qualified type continuations keep the binding list open', () => {
+    for (const source of [
+      `export let x: Foo
+["bar"], y = 1;`,
+      `export let x: Foo
+.Bar, y = 1;`
+    ]) {
+      const [, exports] = parse(source);
+      assert.deepStrictEqual(exports.map(e => e.n), ['x', 'y'], source);
+    }
+  });
+
+  test('destructuring annotations retain every bound and trailing name', () => {
+    const [, exports] = parse(`
+      export const { alpha, beta: gamma }: Record<string, number> = object,
+        [delta, epsilon]: [number, number] = pair,
+        zeta = 1;
+    `);
+    assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'gamma', 'delta', 'epsilon', 'zeta']);
+  });
+
+  test('typed binding ASI does not consume names from the next statement', () => {
+    const [, exports] = parse(`
+      export let alpha: number
+      foo, bar;
+      export const beta: string = 'two';
+    `);
+    assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'beta']);
+  });
+
+  test('line-leading initializer operators keep the binding list open', () => {
+    for (const source of [
+      `export const alpha: number = foo
+        + bar, beta = 1;`,
+      `export const alpha: number = foo/*
+        */ + bar, beta = 1;`,
+      `export const alpha: number = foo // comment
+        + bar, beta = 1;`
+    ]) {
+      const [, exports] = parse(source);
+      assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'beta'], source);
+    }
+  });
+
+  test('annotation comments keep binding delimiters on the next line', () => {
+    for (const source of [
+      `export const alpha: number/*
+        */ = 1, beta = 2;`,
+      `export const alpha: number // comment
+        = 1, beta = 2;`
+    ]) {
+      const [, exports] = parse(source);
+      assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'beta'], source);
+    }
+  });
+
   // JS-superset guards: none of these are type declarations.
   test('type as a plain variable is not a declaration', () => {
     const [, exports] = parse(`export const type = 5;`);

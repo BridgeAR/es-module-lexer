@@ -132,6 +132,16 @@ static const char16_t KEYWORDS[] = {
 #define EQUIRE (ODULE + 5)
 #endif
 
+#ifdef LEX_TS
+#define TS_EXPORT_BINDING_INITIALIZER ((uint32_t)-1)
+
+// Zero is inactive; one is a top-level annotation and larger values are its
+// nested generic depth. UINT32_MAX denotes the initializer after an annotation.
+static uint32_t tsExportBindingDepth;
+
+static void resumeTsExportBindingList ();
+#endif
+
 
 #ifndef LEXER_MIN
 static Export** export_buckets;
@@ -221,6 +231,73 @@ static inline __attribute__((always_inline)) bool isTokenRunChar (char16_t ch) {
   return (char16_t)((ch | 32) - 'a') < 26 || (char16_t)(ch - '0') < 10 ||
     ch == '$' || ch == '_' || ch == '\\' || (ch > 127 && ch != 160);
 }
+
+static inline __attribute__((always_inline)) bool isTokenValue (char16_t ch) {
+  return ch == '/' ? !lastSlashWasDivision
+    : isValueChar(ch) || ch == ')' || ch == ']' || ch == '}' || ch == '\'' || ch == '"' || ch == '`';
+}
+
+#ifdef LEX_TS
+static bool expressionContinuesAfterLineBreak (char16_t ch) {
+  if (ch == '+' || ch == '-')
+    return *(pos + 1) != ch;
+  if (ch == '!')
+    return *(pos + 1) == '=';
+  if (ch == '(' || ch == '[' || ch == '`' || ch == '?' || ch == '.')
+    return true;
+  if (ch == '*' || ch == '/' || ch == '%' || ch == '&' || ch == '|' || ch == '^' ||
+      ch == '<' || ch == '>' || ch == '=')
+    return true;
+  if (ch != 'i')
+    return false;
+  return *(pos + 1) == 'n' && isBrOrWsOrPunctuatorNotDot(*(pos + 2)) ||
+    memcmp(pos, INSTAN, 6 * 2) == 0 && *(pos + 6) == 'c' && *(pos + 7) == 'e' &&
+      *(pos + 8) == 'o' && *(pos + 9) == 'f' &&
+      isBrOrWsOrPunctuatorNotDot(*(pos + 10));
+}
+
+static bool tsTypeOperandPending () {
+  if (openTokenDepth > 0 || tsExportBindingDepth > 1 && tsExportBindingDepth != TS_EXPORT_BINDING_INITIALIZER)
+    return true;
+  char16_t ch = *lastTokenPos;
+  if (ch == '<' || ch == '|' || ch == '&' || ch == '?' || ch == ':' || ch == '.' || ch == '=' || ch == ',')
+    return true;
+  if (ch == '>' && *(lastTokenPos - 1) == '=')
+    return true;
+  if (!isTokenRunChar(ch))
+    return false;
+  char16_t* tokenStart = lastTokenPos;
+  while (tokenStart > source && isTokenRunChar(*(tokenStart - 1)))
+    tokenStart--;
+  if (isTsTypePrefixKeyword(tokenStart, lastTokenPos + 1))
+    return true;
+  return lastTokenPos - tokenStart == 6 && *tokenStart == 'e' &&
+    memcmp(tokenStart + 1, XTENDS, 6 * 2) == 0;
+}
+
+static bool continuesTsTypeAfterLineBreak (char16_t ch) {
+  if (ch == ',' || ch == '<' || ch == '[' || ch == '|' || ch == '&' || ch == '?' || ch == ':' || ch == '.')
+    return true;
+  if (ch == '=')
+    return true;
+  return ch == 'e' && memcmp(pos + 1, XTENDS, 6 * 2) == 0 &&
+    isBrOrWsOrPunctuatorNotDot(*(pos + 7));
+}
+
+static void resolveTsExportBindingLineBreak (char16_t* lookahead) {
+  if (openTokenDepth > 0)
+    return;
+  char16_t* savePos = pos;
+  pos = lookahead;
+  char16_t ch = commentWhitespace(true);
+  bool keep = tsExportBindingDepth == TS_EXPORT_BINDING_INITIALIZER
+    ? !isTokenValue(*lastTokenPos) || ch == ',' || expressionContinuesAfterLineBreak(ch)
+    : tsTypeOperandPending() || continuesTsTypeAfterLineBreak(ch);
+  if (!keep)
+    tsExportBindingDepth = 0;
+  pos = savePos;
+}
+#endif
 
 // At dynamic-import finalization: keep the recorded ${...} spans only when the
 // specifier template's closing backtick was the last token of the argument, so
@@ -337,11 +414,32 @@ static inline __attribute__((always_inline)) bool consumeToken (char16_t ch) {
       openTokenStack[openTokenDepth].token = AnyBracket;
       openTokenStack[openTokenDepth++].pos = lastTokenPos;
       break;
+#ifdef LEX_TS
+    case '<':
+      if (tsExportBindingDepth != 0 && tsExportBindingDepth != TS_EXPORT_BINDING_INITIALIZER)
+        tsExportBindingDepth++;
+      break;
+    case '>':
+      if (tsExportBindingDepth > 1 && tsExportBindingDepth != TS_EXPORT_BINDING_INITIALIZER && *(pos - 1) != '=')
+        tsExportBindingDepth--;
+      break;
+    case '=':
+      if (tsExportBindingDepth == 1 && openTokenDepth == 0 && *(pos + 1) != '>')
+        tsExportBindingDepth = TS_EXPORT_BINDING_INITIALIZER;
+      break;
+#endif
     case ']':
       if (openTokenDepth == 0) return syntaxError(), false;
       openTokenDepth--;
       break;
     case ',':
+#ifdef LEX_TS
+      if ((tsExportBindingDepth == 1 || tsExportBindingDepth == TS_EXPORT_BINDING_INITIALIZER) &&
+          openTokenDepth == 0) {
+        resumeTsExportBindingList();
+        break;
+      }
+#endif
       if (dynamicImportStackDepth > 0 && openTokenDepth > 0 && openTokenStack[openTokenDepth - 1].token == ImportParen) {
         Import* cur_dynamic_import = dynamicImportStack[dynamicImportStackDepth - 1];
         if (cur_dynamic_import->end == 0) {
@@ -353,6 +451,12 @@ static inline __attribute__((always_inline)) bool consumeToken (char16_t ch) {
           pos--;
         }
       }
+      break;
+    case ';':
+#ifdef LEX_TS
+      if (tsExportBindingDepth != 0 && openTokenDepth == 0)
+        tsExportBindingDepth = 0;
+#endif
       break;
     case ')':
       if (openTokenDepth == 0) return syntaxError(), false;
@@ -435,9 +539,23 @@ static inline __attribute__((always_inline)) bool consumeToken (char16_t ch) {
       return true;
     }
 #endif
-    case '/':
+    case '/': {
+#ifdef LEX_TS
+      char16_t* commentStart = pos;
+#endif
       isComment = handleSlash();
+#ifdef LEX_TS
+      if (isComment && tsExportBindingDepth != 0 && openTokenDepth == 0) {
+        for (char16_t* commentPos = commentStart; commentPos <= pos; commentPos++) {
+          if (isBr(*commentPos)) {
+            resolveTsExportBindingLineBreak(isBr(*pos) ? pos : pos + 1);
+            break;
+          }
+        }
+      }
+#endif
       break;
+    }
     case '`':
 #ifndef LEXER_MIN
       // A backtick that opens an active dynamic import's argument (its recorded
@@ -482,6 +600,9 @@ bool parse () {
   openTokenDepth = 0;
   lastTokenPos = (char16_t*)STATEMENT_END;
   lastSlashWasDivision = false;
+#ifdef LEX_TS
+  tsExportBindingDepth = 0;
+#endif
   parse_error = 0;
   has_error = false;
   openTokenStack = &openTokenStack_[0];
@@ -569,6 +690,10 @@ bool parse () {
     ch = *pos;
 
     if (ch == 32 || ch < 14 && ch > 8) {
+#ifdef LEX_TS
+      if (tsExportBindingDepth != 0 && isBr(ch))
+        resolveTsExportBindingLineBreak(pos);
+#endif
       continue;
     }
 
@@ -1372,8 +1497,7 @@ char16_t skipExpression (bool asi) {
         return *pos;
     }
     else {
-      lastWasValue = ch == '/' ? !lastSlashWasDivision
-                   : isValueChar(ch) || ch == ')' || ch == ']' || ch == '}' || ch == '\'' || ch == '"' || ch == '`';
+      lastWasValue = isTokenValue(ch);
     }
   }
   return '\0';
@@ -1463,6 +1587,34 @@ void readBindingPattern () {
     }
   }
 }
+
+#ifdef LEX_TS
+// Re-enters the declaration owner only after the main tokenizer has proven a
+// comma is outside the current annotation or initializer.
+static void resumeTsExportBindingList () {
+  tsExportBindingDepth = 0;
+  while (pos++ < end) {
+    char16_t ch = commentWhitespace(true);
+    char16_t* bindingStart = pos;
+    ch = readBindingTarget(ch);
+    if (pos == bindingStart)
+      return;
+    if (ch == ':') {
+      tsExportBindingDepth = 1;
+      return;
+    }
+    if (ch == '=') {
+      tsExportBindingDepth = TS_EXPORT_BINDING_INITIALIZER;
+      return;
+    }
+    if (ch != ',') {
+      if (isBr(ch))
+        pos--;
+      return;
+    }
+  }
+}
+#endif
 
 // Returns true when an erased TypeScript declaration consumed the statement.
 bool tryParseExportStatement () {
@@ -1719,6 +1871,12 @@ bool tryParseExportStatement () {
           ch = readBindingTarget(ch);
           if (pos == bindingStart)
             break;
+#ifdef LEX_TS
+          if (ch == ':') {
+            tsExportBindingDepth = 1;
+            return false;
+          }
+#endif
           if (ch == '=')
             ch = skipExpression(true);
           if (ch != ',')
