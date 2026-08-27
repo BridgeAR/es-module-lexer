@@ -8,18 +8,15 @@
 //
 // Properties checked on the original parse:
 //   1. No crash / no thrown parse error where Node accepted the source.
-//   2. Every runtime (`tp === false`) import the lexer reports has a specifier
-//      that still exists after stripping (no leaked type-only edge), and every
-//      runtime import that survives stripping is reported (no swallowed edge).
+//   2. Every import the lexer classifies as runtime has a specifier that still
+//      exists after stripping (no leaked type-only edge), and every runtime
+//      import that survives stripping is reported (no swallowed edge).
 //   3. The same subset relationship, both directions, for runtime exports. This
 //      catches a declaration skipper that runs past its terminator and eats the
 //      following statement, not just a leaked `import(...)` type reference.
 //
 // Env:
 //   FUZZ_ENGINE=asm   run against the asm.js build instead of Wasm.
-//   IN_SCOPE=1        drop the forms Node strips but the lexer intentionally
-//                     leaves to a full TS transform (value-position annotations)
-//                     so every finding is a real in-scope divergence.
 //   FORM=<name>       restrict generation to a single FORMS key (debugging).
 //   MAX_FINDINGS=<n>  cap the printed findings (default 40).
 //   NO_MINIMIZE=1     skip shrinking; print the raw generated source.
@@ -34,7 +31,6 @@ const mod = await import(new URL(ENGINE, import.meta.url).href);
 if (mod.init) await mod.init;
 const parse = mod.parse;
 
-const IN_SCOPE = process.env.IN_SCOPE === '1';
 const ONLY_FORM = process.env.FORM;
 const iterations = Number(process.argv[2] ?? 20000);
 const maxFindings = Number(process.env.MAX_FINDINGS ?? 40);
@@ -166,10 +162,22 @@ function nestStatement (statement) {
   ]);
 }
 
-// Out-of-scope statement forms: value-position type annotations. Node strips
-// these, but the lexer only erases exported/bare declarations and type-only
-// import/export clauses, so their embedded import() types stay visible.
-const OUT_OF_SCOPE = new Set(['const-annot']);
+function exportBindingList () {
+  const declaration = pick(['const', 'let']);
+  const names = ['alpha', 'beta', 'gamma', 'delta'];
+  const count = 2 + Math.floor(rand() * 3);
+  let source = `export ${declaration} `;
+  for (let index = 0; index < count; index++) {
+    if (index !== 0)
+      source += pick([', ', ',\n', ',/*c*/\n', ', // c\n']);
+    source += names[index];
+    if (index === 0 || maybe(0.75))
+      source += pick([': ', ':\n', ':/*c*/']) + typeExpr(2);
+    if (declaration === 'const' || maybe(0.75))
+      source += pick([' = ', '\n= ', '/*\n*/ = ']) + pick(['1', 'value', "import('runtime')", '[1, 2]']);
+  }
+  return source + ';';
+}
 
 const FORMS = {
   'import-type-named': () => `import${requiredWs()}type${requiredWs()}{ ${pick(NAME)}${maybe() ? ` as ${pick(NAME)}` : ''} }${requiredWs()}from ${pick(SPEC)};`,
@@ -191,6 +199,7 @@ const FORMS = {
   'bare-interface': () => `interface${requiredWs()}${pick(NAME)}${typeParams()}${heritage()} ${interfaceBody()}`,
   'nested-type': () => nestStatement(`type ${pick(NAME)}${typeParams()}${w()}=${w()}${typeExpr(2)}${pick([';', '\n', ''])}`),
   'nested-interface': () => nestStatement(`interface${requiredWs()}${pick(NAME)}${typeParams()}${heritage()} ${interfaceBody()}`),
+  'export-binding-list': exportBindingList,
   'const-annot': () => `export const ${pick(NAME)}${maybe() ? ': ' + typeExpr(1) : ''} = ${maybe() ? 'import(' + pick(SPEC) + ')' : '1'};`,
   'dynamic-import': () => `const x = import(${pick(SPEC)});`,
   'export-default': () => `export default ${maybe() ? 'import(' + pick(SPEC) + ')' : '1'};`,
@@ -198,7 +207,7 @@ const FORMS = {
 
 const FORM_KEYS = ONLY_FORM
   ? [ONLY_FORM]
-  : Object.keys(FORMS).filter(k => !(IN_SCOPE && OUT_OF_SCOPE.has(k)));
+  : Object.keys(FORMS);
 
 function stmt () {
   return FORMS[pick(FORM_KEYS)]();
@@ -215,13 +224,14 @@ function genSource () {
   return out;
 }
 
-// Multiset of runtime import specifiers the lexer reports (typeOnly false, and
-// a resolved specifier only — dynamic import()s with a non-constant specifier
-// have none). Type-only imports are erased, so excluded.
+// Multiset of runtime import specifiers the lexer reports. Dynamic imports use
+// probablyTypeOnly; static imports use typeOnly. Imports with an unresolved
+// specifier are excluded.
 function runtimeImportSpecs (res) {
   const specs = [];
   for (const imp of res[0]) {
-    if (imp.type === 'import-meta' || imp.typeOnly) continue;
+    if (imp.type === 'import-meta' ||
+        (imp.type === 'dynamic' ? imp.probablyTypeOnly : imp.typeOnly)) continue;
     if (imp.specifier === undefined) continue;
     specs.push(imp.specifier);
   }

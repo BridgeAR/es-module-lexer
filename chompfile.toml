@@ -267,7 +267,7 @@ deps = ['test:wasm', 'test:asm', 'test:minimal:wasm', 'test:minimal:asm', 'test:
 name = 'test:fuzz'
 deps = ['dist/lexer.js']
 run = '''
-	IN_SCOPE=1 node test/fuzz-ts.mjs 500000 ${SEED:-$RANDOM$RANDOM}
+	node test/fuzz-ts.mjs 500000 ${SEED:-$RANDOM$RANDOM}
 '''
 
 [[task]]
