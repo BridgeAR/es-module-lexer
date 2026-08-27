@@ -1054,6 +1054,10 @@ static inline __attribute__((always_inline)) bool tryTsTypeModifier (char16_t* c
   return true;
 }
 
+static inline __attribute__((always_inline)) bool isTsTypeOnlySpecifier (bool typeOnlyStatement, char16_t* ch) {
+  return typeOnlyStatement || (*ch == 't' && tryTsTypeModifier(ch));
+}
+
 // Consumes a comment, string, or template literal so no bracket, angle, or
 // `import` inside one is misread while skipping erased type syntax. pos AT the
 // candidate char; returns true and leaves pos AT the last consumed char when it
@@ -1671,7 +1675,7 @@ bool tryParseExportStatement () {
     ch = commentWhitespace(true);
     while (true) {
 #ifdef LEX_TS
-      bool typeOnlySpecifier = typeOnlyStatement || (ch == 't' && tryTsTypeModifier(&ch));
+      bool typeOnlySpecifier = isTsTypeOnlySpecifier(typeOnlyStatement, &ch);
 #endif
       char16_t* startPos = pos;
 
@@ -2175,7 +2179,7 @@ static char16_t collectNamedImportBindings (uint32_t import_index, bool type_onl
 
   while (ch != '}' && pos <= end) {
 #ifdef LEX_TS
-    bool typeOnly = type_only_statement || (ch == 't' && tryTsTypeModifier(&ch));
+    bool typeOnly = isTsTypeOnlySpecifier(type_only_statement, &ch);
 #else
     bool typeOnly = false;
 #endif
