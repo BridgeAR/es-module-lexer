@@ -331,17 +331,17 @@ static void classifyDynamicImportMember (Import* impt) {
   char16_t ch = commentWhitespace(true);
   bool type_only = false;
   if (ch == '[') {
-    // Only a quoted promise-member name (`import('m')['then']`) keeps an
-    // indexed access runtime.
-    type_only = true;
     pos++;
     ch = commentWhitespace(true);
     if (isQuote(ch)) {
       char16_t* s = pos + 1;
       char16_t* p = s;
       while (p <= end && isIdentifierCodeUnit(*p) && !isBrOrWs(*p) && *p != '\\') p++;
-      if (*p == ch && isPromiseMember(s, p - s))
-        type_only = false;
+      if (*p == ch) {
+        pos = p + 1;
+        if (commentWhitespace(true) == ']')
+          type_only = !isPromiseMember(s, p - s);
+      }
     }
   }
   else if (ch == '.') {
@@ -349,8 +349,8 @@ static void classifyDynamicImportMember (Import* impt) {
     ch = commentWhitespace(true);
     char16_t* s = pos;
     char16_t* p = s;
-    while (p <= end && isIdentifierCodeUnit(*p) && !isBrOrWs(*p)) p++;
-    type_only = p != s && !isPromiseMember(s, p - s);
+    while (p <= end && isIdentifierCodeUnit(*p) && !isBrOrWs(*p) && *p != '\\') p++;
+    type_only = p != s && *p != '\\' && !isPromiseMember(s, p - s);
   }
   pos = savePos;
   impt->type_only = type_only;
@@ -964,7 +964,7 @@ void tryParseImportStatement () {
             }
             pos = requirePos;
           }
-          skipTsErasedTail(true);
+          skipTsErasedTail(true, false);
           pos--;
           return;
         }
@@ -1002,6 +1002,10 @@ bool isValueChar (char16_t c) {
 }
 
 #ifdef LEX_TS
+static inline __attribute__((always_inline)) bool isTsKeywordSeparator (char16_t ch) {
+  return isBrOrWs(ch) || ch == '/';
+}
+
 // True for the contextual `type` token, not identifiers like `typeof`. The
 // follower begins an import/export clause: whitespace (`type T`, `type from`),
 // `{` (`type{`), `*` (`type* as ns`) or `/` (a `type/*c*/{ ... }` comment).
@@ -1009,12 +1013,12 @@ static inline __attribute__((always_inline)) bool isTsTypeKeyword (char16_t* pos
   if (*pos != 't' || memcmp(pos + 1, YPE, 3 * 2) != 0)
     return false;
   char16_t after = *(pos + 4);
-  return isBrOrWs(after) || after == '{' || after == '*' || after == '/';
+  return isTsKeywordSeparator(after) || after == '{' || after == '*';
 }
 
 static inline __attribute__((always_inline)) bool isTsInterfaceKeyword (char16_t* pos) {
   return *pos == 'i' && memcmp(pos + 1, NTERFACE, 8 * 2) == 0 &&
-    (isBrOrWs(*(pos + 9)) || *(pos + 9) == '/');
+    isTsKeywordSeparator(*(pos + 9));
 }
 
 // An identifier may begin here. Type/interface names never start with a digit,
@@ -1106,9 +1110,11 @@ bool skipTsTrivia (char16_t ch, bool stopAtLineBreak) {
 // open across the break: union/intersection arms, conditional-type branches
 // (`? X : Y`), a `extends` constraint, an arrow result or a qualified-name
 // segment. None of these can begin a JS statement, so ASI never applies there.
-static bool tryTsTypeContinuation () {
+static bool tryTsTypeContinuation (bool commaTerminates) {
   char16_t* savePos = pos;
   char16_t ch = commentWhitespace(true);
+  if (commaTerminates && ch == ',')
+    return true;
   if (ch == '|' || ch == '&' || ch == '?' || ch == ':' || ch == '.') {
     pos++;
     return true;
@@ -1173,6 +1179,24 @@ bool skipTsBalanced () {
     }
   }
   return false;
+}
+
+// Scans declaration heritage or a module name through its body and skips the
+// body opaquely. Entry: pos AT ch. Exit: pos AT the char after the body.
+static void skipTsDeclarationBody (char16_t ch) {
+  while (pos < end && ch != '{' && ch != ';') {
+    if (ch == '<' || ch == '(' || ch == '[') {
+      if (!skipTsBalanced())
+        return;
+    } else {
+      if (ch == '/' || isQuote(ch) || ch == '`')
+        skipTsTrivia(ch, false);
+      pos++;
+    }
+    ch = commentWhitespace(true);
+  }
+  if (ch == '{')
+    skipTsBalanced();
 }
 
 // pos AT a `type` or `interface` keyword candidate that begins a declaration.
@@ -1250,17 +1274,7 @@ bool tryTsTypeDeclaration (bool bare) {
     // not mistaken for the body, then skip the body itself balanced. The whole
     // declaration is erased, so no member (`load(): import('m')`) must reach the
     // tokenizer and record a bogus edge.
-    while (pos < end && ch != '{') {
-      if (ch == '<' || ch == '(' || ch == '[') {
-        if (!skipTsBalanced())
-          break;
-      } else {
-        pos++;
-      }
-      ch = commentWhitespace(true);
-    }
-    if (ch == '{')
-      skipTsBalanced();
+    skipTsDeclarationBody(ch);
   }
   else {
     // `type Foo = <rhs>`: skip to '=', then skip the erased RHS
@@ -1270,7 +1284,7 @@ bool tryTsTypeDeclaration (bool bare) {
       ch = (pos++, commentWhitespace(false));
     if (ch == '=') {
       pos++;
-      skipTsErasedTail(true);
+      skipTsErasedTail(true, false);
     }
   }
   pos--;
@@ -1283,15 +1297,16 @@ bool tryTsTypeDeclaration (bool bare) {
 // operand, so a line break there keeps the region open (`type T = keyof\n
 // Foo`); it is false after a value (name, string, template, balanced region),
 // where a line break ends the region by ASI unless a type-only continuation
-// token follows (tryTsTypeContinuation). Leaves pos AT the terminator.
-void skipTsErasedTail (bool operandPending) {
+// token follows (tryTsTypeContinuation). With commaTerminates, a depth-0 comma
+// is also a terminator. Leaves pos AT the terminator.
+void skipTsErasedTail (bool operandPending, bool commaTerminates) {
   while (pos <= end) {
     char16_t ch = *pos;
-    if (ch == ';')
+    if (ch == ';' || commaTerminates && ch == ',')
       break;
     if (isBr(ch)) {
       if (!operandPending) {
-        if (!tryTsTypeContinuation())
+        if (!tryTsTypeContinuation(commaTerminates))
           break;
         operandPending = true;
       }
@@ -1326,7 +1341,7 @@ void skipTsErasedTail (bool operandPending) {
         operandPending = false;
       pos++;
       if (sawLineBreak && !operandPending) {
-        if (!tryTsTypeContinuation())
+        if (!tryTsTypeContinuation(commaTerminates))
           break;
         operandPending = true;
       }
@@ -1369,9 +1384,9 @@ bool isTsTypePrefixKeyword (char16_t* start, char16_t* afterEnd) {
 // after the name, matching the class declaration convention.
 static bool tryTsValueDeclarationName (char16_t ch) {
   int keywordLen;
-  if (ch == 'e' && memcmp(pos + 1, NUM, 3 * 2) == 0 && isBrOrWs(*(pos + 4)))
+  if (ch == 'e' && memcmp(pos + 1, NUM, 3 * 2) == 0 && isTsKeywordSeparator(*(pos + 4)))
     keywordLen = 4;
-  else if (ch == 'n' && memcmp(pos + 1, AMESPACE, 8 * 2) == 0 && isBrOrWs(*(pos + 9)))
+  else if (ch == 'n' && memcmp(pos + 1, AMESPACE, 8 * 2) == 0 && isTsKeywordSeparator(*(pos + 9)))
     keywordLen = 9;
   else
     return false;
@@ -1393,58 +1408,89 @@ static bool tryTsValueDeclarationName (char16_t ch) {
 // but its name stays importable, so it is recorded as a type-only export.
 // Modifier and declaration-kind keywords are skipped to the declared name; a
 // non-identifier there (`declare module 'm'`) records nothing.
+static void tsAmbientBindingList (char16_t ch) {
+  while (pos <= end) {
+    Export* previousExport = export_write_head;
+    char16_t* bindingStart = pos;
+    ch = readBindingTarget(ch);
+    if (pos == bindingStart)
+      return;
+    for (Export* exprt = previousExport == NULL ? first_export : previousExport->next;
+        exprt != NULL; exprt = exprt->next)
+      exprt->import_name_ty |= TYPE_ONLY_EXPORT;
+    if (ch == ':' || ch == '=') {
+      pos++;
+      skipTsErasedTail(true, true);
+      ch = *pos;
+    }
+    if (ch != ',')
+      return;
+    pos++;
+    ch = commentWhitespace(true);
+  }
+}
+
 void tsAmbientExportDeclaration () {
   char16_t ch = commentWhitespace(true);
   if (tryTsTypeDeclaration(false))
     return;
+  bool bindingList = false;
+  bool functionDeclaration = false;
+  bool bodyDeclaration = false;
   for (bool matched = true; matched;) {
     matched = false;
+    if ((ch == 'e' || ch == 'n') && tryTsValueDeclarationName(ch)) {
+      export_write_head->import_name_ty |= TYPE_ONLY_EXPORT;
+      pos++;
+      skipTsDeclarationBody(*pos);
+      pos--;
+      return;
+    }
     switch (ch) {
       case 'a':
-        if (memcmp(pos, ABSTRACT, 8 * 2) == 0 && isBrOrWs(*(pos + 8))) {
+        if (memcmp(pos, ABSTRACT, 8 * 2) == 0 && isTsKeywordSeparator(*(pos + 8))) {
           pos += 8;
           matched = true;
         }
         break;
       case 'c':
-        if ((memcmp(pos + 1, LASS, 4 * 2) == 0 || memcmp(pos + 1, ONST, 4 * 2) == 0) && isBrOrWs(*(pos + 5))) {
+        if (memcmp(pos + 1, LASS, 4 * 2) == 0 && isTsKeywordSeparator(*(pos + 5))) {
           pos += 5;
+          bodyDeclaration = true;
+          bindingList = false;
+          matched = true;
+        }
+        else if (memcmp(pos + 1, ONST, 4 * 2) == 0 && isTsKeywordSeparator(*(pos + 5))) {
+          pos += 5;
+          bindingList = true;
           matched = true;
         }
         break;
       case 'l':
-        if (*(pos + 1) == 'e' && *(pos + 2) == 't' && isBrOrWs(*(pos + 3))) {
+        if (*(pos + 1) == 'e' && *(pos + 2) == 't' && isTsKeywordSeparator(*(pos + 3))) {
           pos += 3;
+          bindingList = true;
           matched = true;
         }
         break;
       case 'v':
-        if (*(pos + 1) == 'a' && *(pos + 2) == 'r' && isBrOrWs(*(pos + 3))) {
+        if (*(pos + 1) == 'a' && *(pos + 2) == 'r' && isTsKeywordSeparator(*(pos + 3))) {
           pos += 3;
+          bindingList = true;
           matched = true;
         }
         break;
       case 'f':
-        if (memcmp(pos + 1, UNCTION, 7 * 2) == 0 && isBrOrWs(*(pos + 8))) {
+        if (memcmp(pos + 1, UNCTION, 7 * 2) == 0 && isTsKeywordSeparator(*(pos + 8))) {
           pos += 8;
-          matched = true;
-        }
-        break;
-      case 'e':
-        if (memcmp(pos + 1, NUM, 3 * 2) == 0 && isBrOrWs(*(pos + 4))) {
-          pos += 4;
-          matched = true;
-        }
-        break;
-      case 'n':
-        if (memcmp(pos + 1, AMESPACE, 8 * 2) == 0 && isBrOrWs(*(pos + 9))) {
-          pos += 9;
+          functionDeclaration = true;
           matched = true;
         }
         break;
       case 'm':
-        if (memcmp(pos + 1, ODULE, 5 * 2) == 0 && isBrOrWs(*(pos + 6))) {
+        if (memcmp(pos + 1, ODULE, 5 * 2) == 0 && isTsKeywordSeparator(*(pos + 6))) {
           pos += 6;
+          bodyDeclaration = true;
           matched = true;
         }
         break;
@@ -1452,13 +1498,22 @@ void tsAmbientExportDeclaration () {
     if (matched)
       ch = commentWhitespace(true);
   }
+  if (bindingList) {
+    tsAmbientBindingList(ch);
+    pos--;
+    return;
+  }
   if (isTsIdentifierStart(ch)) {
     char16_t* nameStart = pos;
     readToWsOrPunctuator(ch);
     addExport(nameStart, pos, nameStart, pos);
     export_write_head->import_name_ty |= TYPE_ONLY_EXPORT;
+    ch = *pos;
   }
-  skipTsErasedTail(false);
+  if (bodyDeclaration)
+    skipTsDeclarationBody(ch);
+  else
+    skipTsErasedTail(functionDeclaration, false);
   pos--;
 }
 #endif
@@ -1745,13 +1800,13 @@ bool tryParseExportStatement () {
 #ifdef LEX_TS
     // `export declare ...` is an ambient declaration: erased, with its name a
     // type-only export.
-    if (ch == 'd' && memcmp(pos + 1, ECLARE, 6 * 2) == 0 && isBrOrWs(*(pos + 7))) {
+    if (ch == 'd' && memcmp(pos + 1, ECLARE, 6 * 2) == 0 && isTsKeywordSeparator(*(pos + 7))) {
       pos += 7;
       tsAmbientExportDeclaration();
-      return false;
+      return true;
     }
     // `abstract` is a value-level class modifier.
-    if (ch == 'a' && memcmp(pos, ABSTRACT, 8 * 2) == 0 && isBrOrWs(*(pos + 8))) {
+    if (ch == 'a' && memcmp(pos, ABSTRACT, 8 * 2) == 0 && isTsKeywordSeparator(*(pos + 8))) {
       pos += 8;
       ch = commentWhitespace(true);
     }

@@ -146,8 +146,7 @@ interface Reexport {
   importNameStart: number;
   importNameEnd: number;
   // module specifier and index of the originating entry in imports
-  // (undefined when the specifier string does not decode as JS)
-  from: string | undefined;
+  from: string;
   importIndex: number;
   start: number;
   end: number;
@@ -157,7 +156,7 @@ interface Reexport {
 
 interface ReexportAll {
   type: 'reexport-all';
-  from: string | undefined;
+  from: string;
   importIndex: number;
   // the `*` range
   start: number;
@@ -273,7 +272,10 @@ Default-exported interfaces and declarations with escaped names are erased but n
 
 All type-only imports and exports and `type` / `interface` declarations are grammar-certain and reported exactly via `typeOnly`. The one heuristic case is dynamic `import()` types: es-module-lexer is a lexer, not a full parser, so an `import()` type in an annotation position (annotations, generic arguments, `as` / `satisfies`) is classified best-effort by how its result is used, reported as `probablyTypeOnly` on the dynamic import record:
 
-* `typeof import('m')`, or a member or indexed access on the result other than the promise members `then` / `catch` / `finally` (`import('m').T`, `import('m')['x']` — quoted promise members like `import('m')['then']` stay runtime), reports `probablyTypeOnly: true` — no runtime promise is used this way.
+* `typeof import('m')` and exact unescaped non-promise members report
+  `probablyTypeOnly: true`. Examples include `import('m').T` and
+  `import('m')['x']`. Promise members (`then`, `catch`, `finally`), computed
+  names, and escaped names stay runtime.
 * `await import('m')` and promise member access always remain runtime imports.
 * A bare unqualified `import('m')` annotation type is indistinguishable from a value use and reports `probablyTypeOnly: false`: runtime module graphs over-report rather than under-report.
 

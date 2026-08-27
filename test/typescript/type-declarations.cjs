@@ -371,6 +371,15 @@ suite('TS type declarations', () => {
     }
   });
 
+  test('line-leading bracket after a complete alias stays runtime', () => {
+    const source = `export type T = Foo
+[import('runtime')];
+export const y = 1;`;
+    const [imports, exports] = parse(source);
+    assert.deepStrictEqual(imports.map(i => [i.n, i.tp]), [['runtime', false]]);
+    assert.deepStrictEqual(exports.map(e => e.n), ['T', 'y']);
+  });
+
   test('destructuring annotations retain every bound and trailing name', () => {
     const [, exports] = parse(`
       export const { alpha, beta: gamma }: Record<string, number> = object,
@@ -490,6 +499,83 @@ suite('TS type declarations', () => {
       assert.deepStrictEqual(imports.map(i => i.n), [], source);
       assert.deepStrictEqual(exports.map(e => e.n), [name, 'y'], source);
       assert.deepStrictEqual(exports.map(e => e.tp), [true, false], source);
+    }
+  });
+
+  test('export declare binding lists record every type-only export', () => {
+    for (const declaration of ['const', 'let', 'var']) {
+      const source = `export declare ${declaration} alpha: number, beta: import('hidden').Value;
+export const y = 1;`;
+      const [imports, exports] = parse(source);
+      assert.deepStrictEqual(imports.map(i => i.n), [], source);
+      assert.deepStrictEqual(exports.map(e => e.n), ['alpha', 'beta', 'y'], source);
+      assert.deepStrictEqual(exports.map(e => e.tp), [true, true, false], source);
+    }
+
+    for (const [source, names, typeOnly] of [
+      [`export declare const alpha = 1, beta: import('hidden').Value;`, ['alpha', 'beta'], [true, true]],
+      [`export declare const { alpha }: { alpha: import('hidden').Value };`, ['alpha'], [true]]
+    ]) {
+      const [imports, exports] = parse(source);
+      assert.deepStrictEqual(imports.map(i => i.n), [], source);
+      assert.deepStrictEqual(exports.map(e => e.n), names, source);
+      assert.deepStrictEqual(exports.map(e => e.tp), typeOnly, source);
+    }
+  });
+
+  test('export declare signatures and bodies stay erased across line breaks', () => {
+    for (const [source, name] of [
+      [`export declare function f
+(value: import('hidden').Value): void;`, 'f'],
+      [`export declare class C extends Base
+{ value: import('hidden').Value }`, 'C'],
+      [`export declare abstract class AbstractC extends Base
+{ value: import('hidden').Value }`, 'AbstractC'],
+      [`export declare enum E
+{ Value = 1 }`, 'E'],
+      [`export declare const enum ConstE
+{ Value = 1 }`, 'ConstE'],
+      [`export declare namespace N
+{ type Value = import('hidden').Value }`, 'N']
+    ]) {
+      const [imports, exports] = parse(source + `\nexport const y = 1;`);
+      assert.deepStrictEqual(imports.map(i => i.n), [], source);
+      assert.deepStrictEqual(exports.map(e => e.n), [name, 'y'], source);
+      assert.deepStrictEqual(exports.map(e => e.tp), [true, false], source);
+    }
+  });
+
+  test('regex after an ambient declaration stays regex', () => {
+    for (const source of [
+      `export declare const x: number;
+/import('hidden')/.test(value);`,
+      `export declare class C {}
+/import('hidden')/.test(value);`
+    ]) {
+      const [imports] = parse(source);
+      assert.deepStrictEqual(imports.map(i => i.n), [], source);
+    }
+  });
+
+  test('ambient string modules stay erased without creating an export', () => {
+    const source = `export declare module 'pkg' { type Value = import('hidden').Value }
+export const y = 1;`;
+    const [imports, exports] = parse(source);
+    assert.deepStrictEqual(imports.map(i => i.n), []);
+    assert.deepStrictEqual(exports.map(e => e.n), ['y']);
+  });
+
+  test('comments may separate TypeScript export declaration keywords', () => {
+    for (const [source, name, typeOnly] of [
+      [`export declare/*c*/ const x: import('hidden').Value;`, 'x', true],
+      [`export abstract/*c*/ class C {}`, 'C', false],
+      [`export enum/*c*/ E { Value }`, 'E', false],
+      [`export namespace/*c*/ N { const value = 1; }`, 'N', false]
+    ]) {
+      const [imports, exports] = parse(source);
+      assert.deepStrictEqual(imports.map(i => i.n), [], source);
+      assert.deepStrictEqual(exports.map(e => e.n), [name], source);
+      assert.strictEqual(exports[0].tp, typeOnly, source);
     }
   });
 

@@ -114,6 +114,37 @@ suite('TS type-only imports', () => {
     assert.deepStrictEqual(imports.map(i => [i.n, i.tp]), [['m', true]]);
   });
 
+  test('computed and escaped promise member access stays runtime', () => {
+    for (const src of [
+      `import('m')[key](f);`,
+      `import('m')[getKey()](f);`,
+      `import('m')['th' + 'en'](f);`,
+      `import('m')['value' + key](f);`,
+      `import('m').th\\u0065n(f);`,
+      `import('m').ca\\u0074ch(f);`,
+      `import('m')['th\\u0065n'](f);`,
+      `import('m')['fina\\u006cly'](f);`
+    ]) {
+      const [imports] = parse(src);
+      assert.strictEqual(imports[0].tp, false, src);
+    }
+  });
+
+  test('trivia before an exact bracketed member preserves type-only classification', () => {
+    const [imports] = parse(`import('m')['Type' /* c */];`);
+    assert.strictEqual(imports[0].tp, true);
+  });
+
+  test('awaited member access stays runtime', () => {
+    for (const src of [
+      `await import('m').Type;`,
+      `await/* c */ import('m')['Type'];`
+    ]) {
+      const [imports] = parse(src);
+      assert.strictEqual(imports[0].tp, false, src);
+    }
+  });
+
   test('comments before a member access do not defeat classification', () => {
     const [imports] = parse(`const p = import('m') /* c */ .Foo;`);
     assert.strictEqual(imports[0].tp, true);

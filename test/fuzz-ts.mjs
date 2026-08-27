@@ -14,6 +14,8 @@
 //   3. The same subset relationship, both directions, for runtime exports. This
 //      catches a declaration skipper that runs past its terminator and eats the
 //      following statement, not just a leaked `import(...)` type reference.
+//   4. Marked erased imports never appear, marked runtime imports remain
+//      definite runtime edges, and marked type exports retain `typeOnly`.
 //
 // Env:
 //   FUZZ_ENGINE=asm   run against the asm.js build instead of Wasm.
@@ -49,6 +51,9 @@ const maybe = (p = 0.5) => rand() < p;
 
 const SPEC = ["'m'", "'m2'", '"m3"', "'./x'"];
 const NAME = ['A', 'B', 'Foo', 'type', 'from', 'as', 'x', 'y', '_z'];
+const ERASED_SPECIFIER = '__fuzz_erased__';
+const RUNTIME_SPECIFIER = '__fuzz_runtime__';
+const TYPE_EXPORT_PATTERN = /__fuzz_type_[A-Za-z0-9_]*/g;
 const WS = ['', ' ', '  ', '\n', '\n ', '/*c*/', '/**/', ' /*c*/ ', '\t', '\n\n', '\n// c\n'];
 const BETWEEN_STATEMENTS = ['\n', '\n\n', ' ', ';', ';\n', '\t'];
 // Runtime statements dropped in after a TS form. A declaration skipper that
@@ -179,6 +184,60 @@ function exportBindingList () {
   return source + ';';
 }
 
+function ambientBindingList () {
+  const shape = pick(['typed', 'initializer', 'pattern']);
+  const declaration = shape === 'typed' ? pick(['const', 'let', 'var']) : 'const';
+  const bindings = shape === 'typed'
+    ? `__fuzz_type_alpha: number, __fuzz_type_beta: import('${ERASED_SPECIFIER}').Value`
+    : shape === 'initializer'
+      ? `__fuzz_type_alpha = 1, __fuzz_type_beta: import('${ERASED_SPECIFIER}').Value`
+      : `{ __fuzz_type_alpha }: { __fuzz_type_alpha: import('${ERASED_SPECIFIER}').Value }`;
+  return `export${requiredWs()}declare${requiredWs()}${declaration}${requiredWs()}${bindings};;`;
+}
+
+function ambientDeclaration () {
+  const gap = requiredWs();
+  return pick([
+    () => `export${requiredWs()}declare${requiredWs()}function${requiredWs()}__fuzz_type_function${gap}` +
+      `(value: import('${ERASED_SPECIFIER}').Value): void;;`,
+    () => `export${requiredWs()}declare${requiredWs()}class${requiredWs()}__fuzz_type_class extends Base${gap}` +
+      `{ value: import('${ERASED_SPECIFIER}').Value };`,
+    () => `export${requiredWs()}declare${requiredWs()}abstract${requiredWs()}class${requiredWs()}` +
+      `__fuzz_type_abstract extends Base${gap}{ value: import('${ERASED_SPECIFIER}').Value };`,
+    () => `export${requiredWs()}declare${requiredWs()}enum${requiredWs()}__fuzz_type_enum${gap}` +
+      `{ Value = 1 };`,
+    () => `export${requiredWs()}declare${requiredWs()}const${requiredWs()}enum${requiredWs()}` +
+      `__fuzz_type_const_enum${gap}{ Value = 1 };`,
+    () => `export${requiredWs()}declare${requiredWs()}namespace${requiredWs()}__fuzz_type_namespace${gap}` +
+      `{ type Value = import('${ERASED_SPECIFIER}').Value };`,
+    () => `export${requiredWs()}declare${requiredWs()}module${requiredWs()}'fuzz-module'${gap}` +
+      `{ type Value = import('${ERASED_SPECIFIER}').Value };`,
+  ])();
+}
+
+function lineBreakAfterTypeAlias () {
+  return `export type __fuzz_type_alias = Foo${pick(['\n', '\n/*c*/'])}` +
+    `[import('${RUNTIME_SPECIFIER}')];`;
+}
+
+function runtimeDynamicMember () {
+  const expression = pick([
+    `await import('${RUNTIME_SPECIFIER}').Type`,
+    `await/*c*/ import('${RUNTIME_SPECIFIER}')['Type']`,
+    `import('${RUNTIME_SPECIFIER}')${pick([
+      '[key]',
+      '[getKey()]',
+      "['th' + 'en']",
+      "['value' + key]",
+      '.th\\u0065n',
+      '.ca\\u0074ch',
+      "['th\\u0065n']",
+      "['fina\\u006cly']"
+    ])}`
+  ]);
+  return `const value = ${expression};`;
+}
+
 const FORMS = {
   'import-type-named': () => `import${requiredWs()}type${requiredWs()}{ ${pick(NAME)}${maybe() ? ` as ${pick(NAME)}` : ''} }${requiredWs()}from ${pick(SPEC)};`,
   'import-type-default': () => `import${requiredWs()}type${requiredWs()}${pick(NAME)} from ${pick(SPEC)};`,
@@ -200,8 +259,13 @@ const FORMS = {
   'nested-type': () => nestStatement(`type ${pick(NAME)}${typeParams()}${w()}=${w()}${typeExpr(2)}${pick([';', '\n', ''])}`),
   'nested-interface': () => nestStatement(`interface${requiredWs()}${pick(NAME)}${typeParams()}${heritage()} ${interfaceBody()}`),
   'export-binding-list': exportBindingList,
+  'export-declare-binding-list': ambientBindingList,
+  'export-declare-body': ambientDeclaration,
+  'export-abstract-class': () => `export${requiredWs()}abstract${requiredWs()}class FuzzAbstract {};`,
+  'line-break-after-type-alias': lineBreakAfterTypeAlias,
   'const-annot': () => `export const ${pick(NAME)}${maybe() ? ': ' + typeExpr(1) : ''} = ${maybe() ? 'import(' + pick(SPEC) + ')' : '1'};`,
   'dynamic-import': () => `const x = import(${pick(SPEC)});`,
+  'dynamic-runtime-member': runtimeDynamicMember,
   'export-default': () => `export default ${maybe() ? 'import(' + pick(SPEC) + ')' : '1'};`,
 };
 
@@ -279,6 +343,31 @@ function classify (src) {
     origRes = parse(src);
   } catch (error) {
     return { kind: 'crash', detail: `lexer threw on TS that Node accepted: ${error.message}`, stripped };
+  }
+
+  for (const imp of origRes[0]) {
+    if (imp.specifier === ERASED_SPECIFIER)
+      return { kind: 'leaked-erased-import', detail: `erased declaration reported ${ERASED_SPECIFIER}`, stripped };
+  }
+
+  const expectedRuntimeImports = src.split(`'${RUNTIME_SPECIFIER}'`).length - 1;
+  let runtimeImports = 0;
+  for (const imp of origRes[0]) {
+    if (imp.specifier === RUNTIME_SPECIFIER && imp.type === 'dynamic' && !imp.probablyTypeOnly)
+      runtimeImports++;
+  }
+  if (runtimeImports !== expectedRuntimeImports) {
+    return {
+      kind: 'missed-certain-runtime-import',
+      detail: `expected ${expectedRuntimeImports} certain runtime imports, received ${runtimeImports}`,
+      stripped
+    };
+  }
+
+  const expectedTypeExports = src.match(TYPE_EXPORT_PATTERN) ?? [];
+  for (const name of expectedTypeExports) {
+    if (!origRes[1].some(exprt => exprt.name === name && exprt.typeOnly))
+      return { kind: 'missed-type-export', detail: `missing type-only export ${name}`, stripped };
   }
 
   const origImports = runtimeImportSpecs(origRes);
