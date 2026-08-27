@@ -433,13 +433,6 @@ static inline __attribute__((always_inline)) bool consumeToken (char16_t ch) {
       openTokenDepth--;
       break;
     case ',':
-#ifdef LEX_TS
-      if ((tsExportBindingDepth == 1 || tsExportBindingDepth == TS_EXPORT_BINDING_INITIALIZER) &&
-          openTokenDepth == 0) {
-        resumeTsExportBindingList();
-        break;
-      }
-#endif
       if (dynamicImportStackDepth > 0 && openTokenDepth > 0 && openTokenStack[openTokenDepth - 1].token == ImportParen) {
         Import* cur_dynamic_import = dynamicImportStack[dynamicImportStackDepth - 1];
         if (cur_dynamic_import->end == 0) {
@@ -451,6 +444,12 @@ static inline __attribute__((always_inline)) bool consumeToken (char16_t ch) {
           pos--;
         }
       }
+#ifdef LEX_TS
+      else if ((tsExportBindingDepth == 1 || tsExportBindingDepth == TS_EXPORT_BINDING_INITIALIZER) &&
+          openTokenDepth == 0) {
+        resumeTsExportBindingList();
+      }
+#endif
       break;
     case ';':
 #ifdef LEX_TS
@@ -691,7 +690,7 @@ bool parse () {
 
     if (ch == 32 || ch < 14 && ch > 8) {
 #ifdef LEX_TS
-      if (tsExportBindingDepth != 0 && isBr(ch))
+      if (isBr(ch) && tsExportBindingDepth != 0)
         resolveTsExportBindingLineBreak(pos);
 #endif
       continue;
@@ -730,7 +729,7 @@ void tryParseImportStatement () {
   // `import type from 'x'` where `from` is the keyword) keeps a runtime edge.
   // Only `import type from from 'x'` (default binding named `from`) is type-only.
   bool typeOnly = false;
-  if (isTsTypeKeyword(pos)) {
+  if (ch == 't' && isTsTypeKeyword(pos)) {
     char16_t* savePos = pos;
     pos += 4;
     char16_t nextCh = commentWhitespace(true);
@@ -1649,7 +1648,7 @@ bool tryParseExportStatement () {
   // identifier after it (`export type T = ...`) is a type alias declaration,
   // handled by tryTsTypeDeclaration alongside `export interface Foo`.
   bool typeOnlyStatement = false;
-  if (isTsTypeKeyword(pos)) {
+  if (ch == 't' && isTsTypeKeyword(pos)) {
     char16_t* savePos = pos;
     pos += 4;
     char16_t nextCh = commentWhitespace(true);
@@ -1662,7 +1661,7 @@ bool tryParseExportStatement () {
         return true;
     }
   }
-  else if (tryTsTypeDeclaration(false))
+  else if (ch == 'i' && tryTsTypeDeclaration(false))
     return true;
 #endif
 
@@ -1672,7 +1671,7 @@ bool tryParseExportStatement () {
     ch = commentWhitespace(true);
     while (true) {
 #ifdef LEX_TS
-      bool typeOnlySpecifier = typeOnlyStatement || tryTsTypeModifier(&ch);
+      bool typeOnlySpecifier = typeOnlyStatement || (ch == 't' && tryTsTypeModifier(&ch));
 #endif
       char16_t* startPos = pos;
 
@@ -1752,7 +1751,7 @@ bool tryParseExportStatement () {
       pos += 8;
       ch = commentWhitespace(true);
     }
-    if (tryTsValueDeclarationName(ch))
+    if ((ch == 'e' || ch == 'n') && tryTsValueDeclarationName(ch))
       return false;
 #endif
     switch (ch) {
@@ -1863,7 +1862,7 @@ bool tryParseExportStatement () {
         ch = commentWhitespace(true);
 #ifdef LEX_TS
         // `export const enum E`: the runtime value name, not a binding list.
-        if (tryTsValueDeclarationName(ch))
+        if ((ch == 'e' || ch == 'n') && tryTsValueDeclarationName(ch))
           return false;
 #endif
         while (pos <= end) {
@@ -2176,7 +2175,7 @@ static char16_t collectNamedImportBindings (uint32_t import_index, bool type_onl
 
   while (ch != '}' && pos <= end) {
 #ifdef LEX_TS
-    bool typeOnly = type_only_statement || tryTsTypeModifier(&ch);
+    bool typeOnly = type_only_statement || (ch == 't' && tryTsTypeModifier(&ch));
 #else
     bool typeOnly = false;
 #endif
