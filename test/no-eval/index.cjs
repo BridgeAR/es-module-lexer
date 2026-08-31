@@ -7,7 +7,7 @@ const minimal = !!process.env.MINIMAL;
 suite('No string code generation', () => {
   suiteSetup(async () => {
     const lexer = commonjs
-      ? require('../../dist/lexer.cjs')
+      ? require(minimal ? '../../dist/lexer.minimal.cjs' : '../../dist/lexer.cjs')
       : await import(minimal ? '../../dist/lexer.minimal.js' : '../../dist/lexer.js');
     await lexer.init;
     parse = lexer.parse;

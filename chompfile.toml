@@ -262,7 +262,8 @@ name = 'test'
 deps = [
   'test:wasm', 'test:asm', 'test:minimal:wasm', 'test:minimal:asm',
   'test:types', 'test:ts:wasm', 'test:ts:asm',
-  'test:no-eval', 'test:no-eval:cjs', 'test:no-eval:minimal'
+  'test:no-eval', 'test:no-eval:cjs',
+  'test:no-eval:minimal', 'test:no-eval:minimal:cjs'
 ]
 
 [[task]]
@@ -306,6 +307,12 @@ run = 'node --disallow-code-generation-from-strings node_modules/mocha/bin/mocha
 name = 'test:no-eval:minimal'
 deps = ['dist/lexer.minimal.js']
 env = { MINIMAL = '1' }
+run = 'node --disallow-code-generation-from-strings node_modules/mocha/bin/mocha.js -b -u tdd test/no-eval/index.cjs'
+
+[[task]]
+name = 'test:no-eval:minimal:cjs'
+deps = ['dist/lexer.minimal.cjs']
+env = { CJS = '1', MINIMAL = '1' }
 run = 'node --disallow-code-generation-from-strings node_modules/mocha/bin/mocha.js -b -u tdd test/no-eval/index.cjs'
 
 [[task]]
