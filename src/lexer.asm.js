@@ -66,9 +66,12 @@ export function parse (_source, _name = '@') {
   while (asm.ri()) {
     const s = asm.is(), e = asm.ie(), importType = asm.it(), t = importType & 15;
     const a = asm.ai(), d = asm.id(), ss = asm.ss(), se = asm.se();
+    const stringFlags = asm.ip();
     let n;
-    if (asm.ip())
+    if (stringFlags === 1/*SafeString*/)
       n = readString(d === -1 ? s : s + 1, d === -1 ? e : e - 1);
+    else if (stringFlags === 3/*SafeString|TemplateRawCR*/)
+      n = readString(d === -1 ? s : s + 1, d === -1 ? e : e - 1, true);
     else if (!MINIMAL && d !== -1 && source.charCodeAt(s) === 96/*`*/)
       n = decodeTemplate(s, e);
     let at = null;
@@ -177,28 +180,32 @@ export function parse (_source, _name = '@') {
  * THE SOFTWARE.
  */
 let acornPos;
+const templateLineEndings = /\r\n?/g;
 /**
  * @param {number} start Start of the string contents.
  * @param {number} end End of the string contents.
+ * @param {boolean} normalizeLineEndings Whether to normalize raw template line endings.
  * @returns {string}
  */
-function readString (start, end) {
-  let escape = source.indexOf('\\', start);
-  if (escape === -1 || escape >= end)
-    return source.slice(start, end);
+function readString (start, end, normalizeLineEndings = false) {
+  const literal = source.slice(start, end);
+  let escape = literal.indexOf('\\');
+  if (escape === -1)
+    return normalizeLineEndings ? literal.replace(templateLineEndings, '\n') : literal;
 
-  let decoded = source.slice(start, escape);
-  while (escape < end) {
+  let chunk = literal.slice(0, escape);
+  let decoded = normalizeLineEndings ? chunk.replace(templateLineEndings, '\n') : chunk;
+  for (;;) {
     let index = escape + 1;
-    if (index >= end) {
-      acornPos = index;
+    if (index >= literal.length) {
+      acornPos = start + index;
       syntaxError();
     }
 
-    const char = source.charCodeAt(index++);
+    const char = literal.charCodeAt(index++);
     switch (char) {
       case 13:
-        if (source.charCodeAt(index) === 10) index++;
+        if (literal.charCodeAt(index) === 10) index++;
         break;
       case 10:
       case 0x2028:
@@ -211,26 +218,26 @@ function readString (start, end) {
       case 102: decoded += '\f'; break;
       case 118: decoded += '\u000b'; break;
       case 120:
-        decoded += String.fromCharCode(readHex(index, 2));
+        decoded += String.fromCharCode(readHex(start + index, 2));
         index += 2;
         break;
       case 117: {
         let codePoint;
-        if (source.charCodeAt(index) === 123) {
-          const close = source.indexOf('}', ++index);
-          if (close === -1 || close >= end) {
-            acornPos = index;
+        if (literal.charCodeAt(index) === 123) {
+          const close = literal.indexOf('}', ++index);
+          if (close === -1) {
+            acornPos = start + index;
             syntaxError();
           }
-          codePoint = readHex(index, close - index);
+          codePoint = readHex(start + index, close - index);
           index = close + 1;
         }
         else {
-          codePoint = readHex(index, 4);
+          codePoint = readHex(start + index, 4);
           index += 4;
         }
         if (codePoint > 0x10ffff) {
-          acornPos = index;
+          acornPos = start + index;
           syntaxError();
         }
         if (codePoint <= 0xffff) {
@@ -243,9 +250,9 @@ function readString (start, end) {
         break;
       }
       case 48: {
-        const next = source.charCodeAt(index);
+        const next = literal.charCodeAt(index);
         if (next >= 48 && next <= 57) {
-          acornPos = index;
+          acornPos = start + index;
           syntaxError();
         }
         decoded += '\0';
@@ -253,19 +260,21 @@ function readString (start, end) {
       }
       default:
         if (char >= 49 && char <= 57) {
-          acornPos = index - 1;
+          acornPos = start + index - 1;
           syntaxError();
         }
         decoded += String.fromCharCode(char);
     }
 
-    const nextEscape = source.indexOf('\\', index);
-    if (nextEscape === -1 || nextEscape >= end)
-      return decoded + source.slice(index, end);
-    decoded += source.slice(index, nextEscape);
+    const nextEscape = literal.indexOf('\\', index);
+    if (nextEscape === -1) {
+      chunk = literal.slice(index);
+      return decoded + (normalizeLineEndings ? chunk.replace(templateLineEndings, '\n') : chunk);
+    }
+    chunk = literal.slice(index, nextEscape);
+    decoded += normalizeLineEndings ? chunk.replace(templateLineEndings, '\n') : chunk;
     escape = nextEscape;
   }
-  return decoded;
 }
 
 // Glob for a lone interpolated-template specifier starting at `s`. The parser

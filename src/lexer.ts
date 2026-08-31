@@ -50,6 +50,11 @@ export enum ImportType {
   StaticReexportStar = 8,
 }
 
+const enum ImportStringFlags {
+  Safe = 1,
+  TemplateRawCR = 2,
+}
+
 /**
  * Import phase modifier: `import source` / `import.source(...)` report
  * `'source'`, `import defer` / `import.defer(...)` report `'defer'`, all
@@ -329,27 +334,28 @@ export interface ParseError extends Error {
 }
 
 const isLE = new Uint8Array(new Uint16Array([1]).buffer)[0] === 1;
+const templateLineEndings = /\r\n?/g;
 
 /**
- * @param source Source containing a validated JavaScript string literal.
- * @param start Start of the string contents.
- * @param end End of the string contents.
+ * @param literal Contents of a validated JavaScript string literal.
+ * @param normalizeLineEndings Whether to normalize raw template line endings.
  */
-function decodeStringLiteral (source: string, start: number, end: number): string {
-  let escape = source.indexOf('\\', start);
-  if (escape === -1 || escape >= end)
-    return source.slice(start, end);
+function decodeStringLiteral (literal: string, normalizeLineEndings: boolean): string {
+  let escape = literal.indexOf('\\');
+  if (escape === -1)
+    return normalizeLineEndings ? literal.replace(templateLineEndings, '\n') : literal;
 
-  let decoded = source.slice(start, escape);
-  while (escape < end) {
+  let chunk = literal.slice(0, escape);
+  let decoded = normalizeLineEndings ? chunk.replace(templateLineEndings, '\n') : chunk;
+  for (;;) {
     let index = escape + 1;
-    if (index >= end)
+    if (index >= literal.length)
       throw new SyntaxError();
 
-    const char = source.charCodeAt(index++);
+    const char = literal.charCodeAt(index++);
     switch (char) {
       case 13:
-        if (source.charCodeAt(index) === 10) index++;
+        if (literal.charCodeAt(index) === 10) index++;
         break;
       case 10:
       case 0x2028:
@@ -362,20 +368,20 @@ function decodeStringLiteral (source: string, start: number, end: number): strin
       case 102: decoded += '\f'; break;
       case 118: decoded += '\u000b'; break;
       case 120:
-        decoded += String.fromCharCode(readHex(source, index, 2));
+        decoded += String.fromCharCode(readHex(literal, index, 2));
         index += 2;
         break;
       case 117: {
         let codePoint;
-        if (source.charCodeAt(index) === 123) {
-          const close = source.indexOf('}', ++index);
-          if (close === -1 || close >= end)
+        if (literal.charCodeAt(index) === 123) {
+          const close = literal.indexOf('}', ++index);
+          if (close === -1)
             throw new SyntaxError();
-          codePoint = readHex(source, index, close - index);
+          codePoint = readHex(literal, index, close - index);
           index = close + 1;
         }
         else {
-          codePoint = readHex(source, index, 4);
+          codePoint = readHex(literal, index, 4);
           index += 4;
         }
         if (codePoint > 0x10ffff)
@@ -390,7 +396,7 @@ function decodeStringLiteral (source: string, start: number, end: number): strin
         break;
       }
       case 48: {
-        const next = source.charCodeAt(index);
+        const next = literal.charCodeAt(index);
         if (next >= 48 && next <= 57)
           throw new SyntaxError();
         decoded += '\0';
@@ -402,13 +408,15 @@ function decodeStringLiteral (source: string, start: number, end: number): strin
         decoded += String.fromCharCode(char);
     }
 
-    const nextEscape = source.indexOf('\\', index);
-    if (nextEscape === -1 || nextEscape >= end)
-      return decoded + source.slice(index, end);
-    decoded += source.slice(index, nextEscape);
+    const nextEscape = literal.indexOf('\\', index);
+    if (nextEscape === -1) {
+      chunk = literal.slice(index);
+      return decoded + (normalizeLineEndings ? chunk.replace(templateLineEndings, '\n') : chunk);
+    }
+    chunk = literal.slice(index, nextEscape);
+    decoded += normalizeLineEndings ? chunk.replace(templateLineEndings, '\n') : chunk;
     escape = nextEscape;
   }
-  return decoded;
 }
 
 /**
@@ -477,9 +485,12 @@ export function parse (source: string, name = '@'): readonly [
   while (wasm.ri()) {
     const s = wasm.is(), e = wasm.ie(), importType = wasm.it(), t = importType & 15;
     const a = wasm.ai(), d = wasm.id(), ss = wasm.ss(), se = wasm.se();
+    const stringFlags = wasm.ip();
     let n;
-    if (wasm.ip())
+    if (stringFlags === ImportStringFlags.Safe)
       n = decode(d === -1 ? s : s + 1, d === -1 ? e : e - 1, s);
+    else if (stringFlags === (ImportStringFlags.Safe | ImportStringFlags.TemplateRawCR))
+      n = decode(d === -1 ? s : s + 1, d === -1 ? e : e - 1, s, true);
     else if (!MINIMAL && d !== -1 && source[s] === '`')
       n = decodeTemplate(s, e);
     let at: Array<[string, string]> | null = null;
@@ -565,9 +576,15 @@ export function parse (source: string, name = '@'): readonly [
     exportPtr = wasm.re();
   }
 
-  function decode (start: number, end: number, idx: number): string {
+  /**
+   * @param start Start of the string contents.
+   * @param end End of the string contents.
+   * @param idx Index to report for invalid escapes.
+   * @param normalizeLineEndings Whether to normalize raw template line endings.
+   */
+  function decode (start: number, end: number, idx: number, normalizeLineEndings = false): string {
     try {
-      return decodeStringLiteral(source, start, end)
+      return decodeStringLiteral(source.slice(start, end), normalizeLineEndings)
     }
     catch (e) {
       throw Object.assign(new Error(`Parse error ${name}:${source.slice(0, idx).split('\n').length}:${idx - source.lastIndexOf('\n', idx - 1)}`), { idx });
@@ -668,7 +685,7 @@ let wasm: {
   id(): number;
   /** getImportEnd */
   ie(): number;
-  /** getImportSafeString */
+  /** getImportStringFlags */
   ip(): number;
   /** getImportStart */
   is(): number;
