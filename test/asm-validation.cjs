@@ -10,7 +10,7 @@ if (process.env.ASM) {
     test('validates without falling back to JavaScript', () => {
       const bundle = pathToFileURL(resolve(
         __dirname,
-        min ? '../dist/lexer.minimal.asm.js' : '../dist/lexer.asm.js'
+        min ? '../dist/lexer.minimal.asm.js' : process.env.BINDINGS ? '../dist/lexer.bindings.asm.js' : '../dist/lexer.asm.js'
       )).href;
       const env = { ...process.env };
       delete env.NODE_NO_WARNINGS;
